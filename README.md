@@ -1,4 +1,5 @@
 # **CarbolicAcid (v0.3.3)**
+CarbolicAcid is a CoreDNS plugin for filtering poisoned DNS responses.
 
 > Named in tribute to Joseph Lister, the British surgeon who first used **carbolic acid** for surgical antisepsis in 1865.  
 > CarbolicAcid is a CoreDNS plugin designed to intercept DNS responses containing **poisoned IP addresses** and prevent them from entering the CoreDNS cache.  
