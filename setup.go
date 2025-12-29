@@ -30,56 +30,131 @@ func setup(c *caddy.Controller) error {
 
 type ResponseAction int
 
+type RuleKind int
+
+const (
+    RulePreset RuleKind = iota
+    RuleInclude // 用于 block
+)
+
 const (
     ActionDrop ResponseAction = iota
     ActionServfail
     ActionNxdomain
+    ActionBypass // v0.3.3: 透传但记录告警
 )
 
+// v0.3.3 新语法：结构化 preset/block 节点
+type BlockNode struct {
+    Kind  RuleKind // RulePreset 或 RuleInclude（block）
+    Value string   // preset 名称或 CIDR
+    Excl  []string // exclude 列表
+}
+
 type Config struct {
-    Preset       string         // 预设模式："none"（默认）或 "iana"
-    ExcludeCIDRs []string       // 用户排除段（任意 CIDR 字符串）
-    IncludeCIDRs []string       // 用户追加的投毒段（任意 CIDR 字符串）
-    Action       ResponseAction // 毒应答处理策略："drop" | "nxdomain" | "servfail"
-    blockList    *IPSet         // 预处理后的结构（全部 bit 化），ServeDNS 直接用它做匹配
-    initOnce     sync.Once      // 避免setup()在coredns启动的同时产生大量CIDR初始化计算
-    initErr      error
+    Action ResponseAction
+
+    // v0.3.3 新语法：结构化 block/preset
+    Blocks []*BlockNode
+
+    // 运行时结构：双表模型
+    blockList *IPSet
+    allowList *IPSet
+
+    initOnce sync.Once
+    initErr  error
 }
 
 func parseConfig(c *caddy.Controller) (*Config, error) {
     cfg := &Config{
-        Preset: "none",     // 默认不加载任何预设
-        Action: ActionDrop, // v0.3改进：应答处理默认策略
+        Action: ActionDrop,
     }
 
     for c.Next() {
         for c.NextBlock() {
             switch c.Val() {
+
+            // -------------------------
+            // preset iana { exclude ... }
+            // preset iana
+            // -------------------------
             case "preset":
-                if !c.NextArg() {
+                args := c.RemainingArgs()
+                if len(args) != 1 {
                     return nil, c.ArgErr()
                 }
-                switch c.Val() {
-                case "none":
-                    cfg.Preset = "none"
-                case "iana":
-                    cfg.Preset = "iana"
-                default:
-                    return nil, c.Errf("unknown preset: %s", c.Val())
+                name := args[0]
+
+                node := &BlockNode{
+                    Kind:  RulePreset,
+                    Value: name,
                 }
 
-            case "exclude":
-                if !c.NextArg() {
+                // 尝试读取内层 block：preset NAME { ... }
+                if c.NextBlock() {
+                    for {
+                        switch c.Val() {
+                        case "exclude":
+                            exArgs := c.RemainingArgs()
+                            if len(exArgs) != 1 {
+                                return nil, c.ArgErr()
+                            }
+                            node.Excl = append(node.Excl, exArgs[0])
+
+                        default:
+                            return nil, c.Errf("unknown directive %q inside preset %q", c.Val(), name)
+                        }
+
+                        if !c.NextBlock() {
+                            break
+                        }
+                    }
+                }
+
+                // 无内层 block → 等价于 preset name {}
+                cfg.Blocks = append(cfg.Blocks, node)
+
+            // -------------------------
+            // block CIDR { exclude ... }
+            // block CIDR
+            // -------------------------
+            case "block":
+                args := c.RemainingArgs()
+                if len(args) != 1 {
                     return nil, c.ArgErr()
                 }
-                cfg.ExcludeCIDRs = append(cfg.ExcludeCIDRs, c.Val())
+                cidr := args[0]
 
-            case "include":
-                if !c.NextArg() {
-                    return nil, c.ArgErr()
+                node := &BlockNode{
+                    Kind:  RuleInclude,
+                    Value: cidr,
                 }
-                cfg.IncludeCIDRs = append(cfg.IncludeCIDRs, c.Val())
 
+                if c.NextBlock() {
+                    for {
+                        switch c.Val() {
+                        case "exclude":
+                            exArgs := c.RemainingArgs()
+                            if len(exArgs) != 1 {
+                                return nil, c.ArgErr()
+                            }
+                            node.Excl = append(node.Excl, exArgs[0])
+
+                        default:
+                            return nil, c.Errf("unknown directive %q inside block %q", c.Val(), cidr)
+                        }
+
+                        if !c.NextBlock() {
+                            break
+                        }
+                    }
+                }
+
+                cfg.Blocks = append(cfg.Blocks, node)
+
+            // -------------------------
+            // responses drop|servfail|nxdomain|bypass
+            // -------------------------
             case "responses":
                 args := c.RemainingArgs()
                 if len(args) != 1 {
@@ -92,6 +167,8 @@ func parseConfig(c *caddy.Controller) (*Config, error) {
                     cfg.Action = ActionServfail
                 case "nxdomain":
                     cfg.Action = ActionNxdomain
+                case "bypass":
+                    cfg.Action = ActionBypass
                 default:
                     return nil, c.Errf("invalid responses action: %s", args[0])
                 }
@@ -102,9 +179,5 @@ func parseConfig(c *caddy.Controller) (*Config, error) {
         }
     }
 
-    // v0.3.1避免setup()进行CIDR初始化
-    // if err := cfg.initBlockList(); err != nil {
-        // return nil, err
-    // }
     return cfg, nil
 }
