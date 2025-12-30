@@ -129,6 +129,7 @@ func (c *Config) initBlockList() error {
                 parentCIDRs = append(parentCIDRs, ianaPresetV6...)
             case "allip":
                 parentCIDRs = append(parentCIDRs, "0.0.0.0/0", "::/0")
+                c.presetAllIP = true   // 记录 allip 在使用状态
             case "none":
                 if len(b.Excl) > 0 {
                     return fmt.Errorf("preset 'none' cannot have excludes")

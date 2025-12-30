@@ -445,38 +445,6 @@ func TestPresetNoneWithExcludeShouldFail(t *testing.T) {
     }
 }
 
-// preset allip：0.0.0.0/0 + ::/0，任意 IP 都应命中 blockList
-func TestPresetAllIP(t *testing.T) {
-    cfg := &Config{
-        Blocks: []*BlockNode{
-            {Kind: RulePreset, Value: "allip"},
-        },
-        Action: ActionDrop,
-    }
-
-    if err := cfg.initBlockList(); err != nil {
-        t.Fatalf("initBlockList failed: %v", err)
-    }
-
-    resp1 := makeA("a.example.", "1.2.3.4")
-    if !cfg.blockList.HasAny(resp1) {
-        t.Fatalf("expected IPv4 1.2.3.4 to be blocked by allip")
-    }
-
-    m := new(dns.Msg)
-    m.SetReply(&dns.Msg{
-        Question: []dns.Question{
-            {Name: "b.example.", Qtype: dns.TypeAAAA},
-        },
-    })
-    aaaa, _ := dns.NewRR("b.example. 60 IN AAAA 2001:db8::1")
-    m.Answer = append(m.Answer, aaaa)
-
-    if !cfg.blockList.HasAny(m) {
-        t.Fatalf("expected IPv6 2001:db8::1 to be blocked by allip")
-    }
-}
-
 // allowList 优先：即使同一响应中包含被 block 的 RR，只要有一条在 allowList，就整体放行
 func TestAllowListOverridesBlockList(t *testing.T) {
     cfg := &Config{
@@ -550,5 +518,123 @@ func BenchmarkInitBlockList(b *testing.B) {
     b.ResetTimer()
     for i := 0; i < b.N; i++ {
         _ = cfg.initBlockList()
+    }
+}
+
+// allip 时跳过 blocklist 检查
+func TestPresetAllIP_NoExclude_ShortCircuit(t *testing.T) {
+    cfg := &Config{
+        Blocks: []*BlockNode{
+            {Kind: RulePreset, Value: "allip"},
+        },
+        Action: ActionNxdomain,
+    }
+
+    if err := cfg.initBlockList(); err != nil {
+        t.Fatalf("initBlockList failed: %v", err)
+    }
+
+    if !cfg.presetAllIP {
+        t.Fatalf("presetAllIP flag not set")
+    }
+
+    if cfg.allowList != nil {
+        t.Fatalf("allowList should be nil when no exclude is provided")
+    }
+
+    // 上游响应（任意 IP 都应被阻断）
+    respBlock := makeA("evil.example.", "8.8.8.8")
+
+    next := &testNext{resp: respBlock}
+    ca := &CarbolicAcid{Next: next, cfg: cfg}
+
+    rr := &testResponseWriter{}
+    rc, err := ca.ServeDNS(context.Background(), rr, makeA("evil.example.", "8.8.8.8"))
+    if err != nil {
+        t.Fatalf("ServeDNS error: %v", err)
+    }
+
+    if rc != dns.RcodeNameError {
+        t.Fatalf("expected NXDOMAIN (%d), got %d", dns.RcodeNameError, rc)
+    }
+}
+
+func TestPresetIANA_NoExclude_NormalPath(t *testing.T) {
+    cfg := &Config{
+        Blocks: []*BlockNode{
+            {Kind: RulePreset, Value: "iana"},
+        },
+        Action: ActionNxdomain,
+    }
+
+    if err := cfg.initBlockList(); err != nil {
+        t.Fatalf("initBlockList failed: %v", err)
+    }
+
+    if cfg.presetAllIP {
+        t.Fatalf("presetAllIP should NOT be set for preset iana")
+    }
+
+    if cfg.allowList != nil {
+        t.Fatalf("allowList should be nil when no exclude is provided")
+    }
+
+    // 使用 IANA 文档地址 192.0.2.1
+    resp := makeA("example.com.", "192.0.2.1")
+
+    if !cfg.blockList.HasAny(resp) {
+        t.Fatalf("expected 192.0.2.1 to match preset iana blockList")
+    }
+
+    next := &testNext{resp: resp}
+    ca := &CarbolicAcid{Next: next, cfg: cfg}
+
+    rw := &testResponseWriter{}
+    rc, err := ca.ServeDNS(context.Background(), rw, makeA("example.com.", "1.1.1.1"))
+    if err != nil {
+        t.Fatalf("ServeDNS error: %v", err)
+    }
+
+    if rc != dns.RcodeNameError {
+        t.Fatalf("expected NXDOMAIN, got %d", rc)
+    }
+}
+
+func TestBlock_NoExclude_NormalPath(t *testing.T) {
+    cfg := &Config{
+        Blocks: []*BlockNode{
+            {Kind: RuleInclude, Value: "10.0.0.0/8"},
+        },
+        Action: ActionNxdomain,
+    }
+
+    if err := cfg.initBlockList(); err != nil {
+        t.Fatalf("initBlockList failed: %v", err)
+    }
+
+    if cfg.presetAllIP {
+        t.Fatalf("presetAllIP should NOT be set for block rules")
+    }
+
+    if cfg.allowList != nil {
+        t.Fatalf("allowList should be nil when no exclude is provided")
+    }
+
+    resp := makeA("example.com.", "10.1.2.3")
+    if !cfg.blockList.HasAny(resp) {
+        t.Fatalf("expected 10.1.2.3 to match blockList")
+    }
+
+    next := &testNext{resp: resp}
+    ca := &CarbolicAcid{Next: next, cfg: cfg}
+
+    rw := &testResponseWriter{}
+    rc, err := ca.ServeDNS(context.Background(), rw, makeA("example.com.", "8.8.8.8"))
+    if err != nil {
+        t.Fatalf("ServeDNS error: %v", err)
+    }
+
+    if rc != dns.RcodeNameError {
+        t.Fatalf("expected NXDOMAIN, got %d", rc)
     }
 }

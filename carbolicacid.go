@@ -28,20 +28,20 @@ func (c *CarbolicAcid) Name() string { return "carbolicacid" }
 
 func (c *CarbolicAcid) Ready() bool { return true }
 
-// ServeDNS: v0.3.3 严格模式 + 双表模型 + bypass
+// ServeDNS: v0.3.4 严格模式 + 显式短路 + allowList 优先
 func (c *CarbolicAcid) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
-    // 初始化 blockList + allowList
+    // 初始化 blockList + allowList（只执行一次）
     c.cfg.initOnce.Do(func() {
         c.cfg.initErr = c.cfg.initBlockList()
     })
 
-    // 初始化失败 → 直接 bypass 整个插件，透传上游行为
+    // 初始化失败 → 整个插件 bypass
     if c.cfg.initErr != nil {
         log.Errorf("[carbolicacid] init failed: %v, fallback to BYPASS mode", c.cfg.initErr)
         return plugin.NextOrFailure(c.Name(), c.Next, ctx, w, r)
     }
 
-    // 用 respRecorder 截获上游响应
+    // 截获上游响应
     rw := &respRecorder{ResponseWriter: w}
     rc, err := plugin.NextOrFailure(c.Name(), c.Next, ctx, rw, r)
     if err != nil {
@@ -50,44 +50,76 @@ func (c *CarbolicAcid) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dn
 
     resp := rw.msg
     if resp == nil {
-        // 上游没有返回响应，直接结束
-        return rc, nil
+        return rc, nil // 上游无响应
     }
 
-    // 先看 allowList：命中则直接放行（即便 blockList 也命中）
-    if c.cfg.allowList != nil && c.cfg.allowList.HasAny(resp) {
-        w.WriteMsg(resp)
-        return rc, nil
-    }
-
-    // 再看 blockList：命中则按策略处理
-    if c.cfg.blockList != nil && c.cfg.blockList.HasAny(resp) {
-        switch c.cfg.Action {
-        case ActionDrop:
-            // 什么都不写，直接丢弃
-            return rc, nil
-
-        case ActionServfail:
-            m := new(dns.Msg)
-            m.SetRcode(r, dns.RcodeServerFailure)
-            w.WriteMsg(m)
-            return dns.RcodeServerFailure, nil
-
-        case ActionNxdomain:
-            m := new(dns.Msg)
-            m.SetRcode(r, dns.RcodeNameError)
-            w.WriteMsg(m)
-            return dns.RcodeNameError, nil
-
-        case ActionBypass:
-            // 记录告警，但透传上游响应
-            log.Warningf("[carbolicacid] poisoned response bypassed: %s", r.Question[0].Name)
+    // ---------------------------------------------------------
+    // 1) allowList 优先（仅当 allowList 存在时）
+    // ---------------------------------------------------------
+    if c.cfg.allowList != nil {
+        if c.cfg.allowList.HasAny(resp) {
             w.WriteMsg(resp)
             return rc, nil
         }
     }
 
-    // 未命中任何表 → 正常返回上游响应
+    // ---------------------------------------------------------
+    // 2) preset = allip → 进入“全阻断模式”
+    //
+    //    - allowList 存在且命中 → 已在上面放行
+    //    - allowList 不存在 或 未命中 → 必须阻断
+    //    - blockList 永远跳过
+    // ---------------------------------------------------------
+    if c.cfg.presetAllIP {
+        switch c.cfg.Action {
+        case ActionDrop:
+            return rc, nil
+        case ActionServfail:
+            m := new(dns.Msg)
+            m.SetRcode(r, dns.RcodeServerFailure)
+            w.WriteMsg(m)
+            return dns.RcodeServerFailure, nil
+        case ActionNxdomain:
+            m := new(dns.Msg)
+            m.SetRcode(r, dns.RcodeNameError)
+            w.WriteMsg(m)
+            return dns.RcodeNameError, nil
+        case ActionBypass:
+            w.WriteMsg(resp)
+            return rc, nil
+        }
+    }
+
+    // ---------------------------------------------------------
+    // 3) preset ≠ allip → 正常双表模型
+    //
+    //    - allowList 已经在上面检查过
+    //    - blockList 命中 → 阻断
+    //    - 否则 → 放行
+    // ---------------------------------------------------------
+    if c.cfg.blockList != nil && c.cfg.blockList.HasAny(resp) {
+        switch c.cfg.Action {
+        case ActionDrop:
+            return rc, nil
+        case ActionServfail:
+            m := new(dns.Msg)
+            m.SetRcode(r, dns.RcodeServerFailure)
+            w.WriteMsg(m)
+            return dns.RcodeServerFailure, nil
+        case ActionNxdomain:
+            m := new(dns.Msg)
+            m.SetRcode(r, dns.RcodeNameError)
+            w.WriteMsg(m)
+            return dns.RcodeNameError, nil
+        case ActionBypass:
+            w.WriteMsg(resp)
+            return rc, nil
+        }
+    }
+
+    // ---------------------------------------------------------
+    // 4) 未命中任何表 → 正常返回上游响应
+    // ---------------------------------------------------------
     w.WriteMsg(resp)
     return rc, nil
 }

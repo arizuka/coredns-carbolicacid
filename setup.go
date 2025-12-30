@@ -63,6 +63,8 @@ type Config struct {
 
     initOnce sync.Once
     initErr  error
+
+    presetAllIP bool // 是否使用 preset allip }
 }
 
 func parseConfig(c *caddy.Controller) (*Config, error) {
