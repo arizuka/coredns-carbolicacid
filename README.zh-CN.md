@@ -1,5 +1,7 @@
 # CarbolicAcid (v0.3.4)
 CarbolicAcid 是一个 CoreDNS 插件，用于过滤被污染的 DNS 响应。
+关于如何在 CoreDNS 中启用或禁用插件，请参考官方文档：
+https://coredns.io/2017/07/25/compile-time-enabling-or-disabling-plugins/
 
 > 向英国外科医生约瑟夫·李斯特于 1865 年首次将 **石炭酸** 用于手术消毒致敬。  
 > CarbolicAcid 是一个 CoreDNS 插件，用于拦截发往下游的“投毒 IP”应答报文，并阻止“投毒 IP”进入 CoreDNS 缓存，例如：
